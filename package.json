@@ -5,16 +5,27 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js",
+    "start": "node index.js --transport=stdio",
+    "start:stdio": "node index.js --transport=stdio",
+    "start:http": "node index.js --transport=http",
     "dev": "node --watch index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.5.0",
-    "mssql": "^11.0.1",
+    "@modelcontextprotocol/sdk": "^1.13.0",
     "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "mssql": "^11.0.1",
     "winston": "^3.11.0"
   },
-  "keywords": ["mcp", "sql", "mssql", "database"],
+  "keywords": [
+    "mcp",
+    "sql",
+    "mssql",
+    "database"
+  ],
   "author": "",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "axios": "^1.10.0"
+  }
 }

@@ -2,6 +2,9 @@
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+//import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -11,6 +14,8 @@ import dotenv from 'dotenv';
 import winston from 'winston';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import express from 'express';
+import { randomUUID } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,14 +47,9 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir);
 }
 
-// Configure winston logger - file only, no console output
-const logger = winston.createLogger({
-  level: 'debug',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
+// Configure winston logger
+function createLogger(transportType) {
+  const transports = [
     new winston.transports.File({ 
       filename: path.join(logsDir, 'error.log'), 
       level: 'error',
@@ -61,13 +61,35 @@ const logger = winston.createLogger({
       handleExceptions: true,
       handleRejections: true
     })
-  ],
-  // Prevent winston from writing to stderr on errors
-  silent: false,
-  exitOnError: false
-});
+  ];
 
-logger.info('Preparing to start MCP MSSQL Server');
+  // Add console transport for HTTP mode
+  if (transportType === 'http') {
+    transports.push(new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      ),
+      handleExceptions: true,
+      handleRejections: true
+    }));
+  }
+
+  return winston.createLogger({
+    level: 'debug',
+    format: winston.format.combine(
+      winston.format.timestamp(),
+      winston.format.json()
+    ),
+    transports,
+    silent: false,
+    exitOnError: false
+  });
+}
+
+// Get transport type early
+const transportType = getTransportArg();
+const logger = createLogger(transportType);
 
 // Redirect console.log and console.error to file logging
 console.log = (...args) => logger.info(args.join(' '));
@@ -248,24 +270,17 @@ class MSSQLMCPServer {
       throw new Error(`SQL execution failed: ${error.message}`);
     } finally {
       await sql.close();
+      logger.debug('Database connection closed');
     }
   }
 
   async listTables() {
     try {
-      logger.debug('Fetching list of tables');
+      logger.debug('Listing tables');
       await this.getConnection();
-      const result = await sql.query(`
-        SELECT 
-          TABLE_NAME,
-          TABLE_TYPE,
-          TABLE_SCHEMA
-        FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_TYPE = 'BASE TABLE'
-        ORDER BY TABLE_SCHEMA, TABLE_NAME
-      `);
-
-      logger.info('Successfully retrieved table list', { tableCount: result.recordset.length });
+      const result = await sql.query`SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'`;
+      logger.info('Tables listed successfully');
+      
       return {
         content: [
           {
@@ -279,6 +294,7 @@ class MSSQLMCPServer {
       throw new Error(`Failed to list tables: ${error.message}`);
     } finally {
       await sql.close();
+      logger.debug('Database connection closed');
     }
   }
 
@@ -286,22 +302,15 @@ class MSSQLMCPServer {
     try {
       logger.debug('Describing table', { tableName });
       await this.getConnection();
-      const result = await sql.query(`
-        SELECT 
-          COLUMN_NAME,
-          DATA_TYPE,
-          IS_NULLABLE,
-          COLUMN_DEFAULT,
-          CHARACTER_MAXIMUM_LENGTH,
-          NUMERIC_PRECISION,
-          NUMERIC_SCALE,
-          ORDINAL_POSITION
+      const request = new sql.Request();
+      request.input('tableName', sql.NVarChar, tableName);
+      const result = await request.query`
+        SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = '${tableName}'
-        ORDER BY ORDINAL_POSITION
-      `);
+        WHERE TABLE_NAME = @tableName
+      `;
+      logger.info('Table described successfully', { tableName });
 
-      logger.info('Successfully described table', { tableName, columnCount: result.recordset.length });
       return {
         content: [
           {
@@ -315,36 +324,117 @@ class MSSQLMCPServer {
       throw new Error(`Failed to describe table: ${error.message}`);
     } finally {
       await sql.close();
+      logger.debug('Database connection closed');
     }
   }
 
   getSqlType(typeString) {
     const typeMap = {
-      'varchar': sql.VarChar,
-      'nvarchar': sql.NVarChar,
-      'int': sql.Int,
-      'bigint': sql.BigInt,
-      'decimal': sql.Decimal,
-      'float': sql.Float,
-      'bit': sql.Bit,
-      'datetime': sql.DateTime,
-      'date': sql.Date,
-      'time': sql.Time,
+      'string': sql.NVarChar,
+      'number': sql.Int,
+      'boolean': sql.Bit,
+      'date': sql.DateTime,
+      // Add other mappings as needed
     };
-    
-    return typeMap[typeString.toLowerCase()] || sql.VarChar;
-  }
-
-  async run() {
-    logger.info('Starting MCP MSSQL Server');
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    logger.info('MCP MSSQL Server running on stdio');
+    return typeMap[typeString.toLowerCase()] || sql.NVarChar;
   }
 }
 
-const server = new MSSQLMCPServer();
-server.run().catch((error) => {
-  logger.error('Server failed to start', { error: error.message, stack: error.stack });
+function getTransportArg() {
+  const arg = process.argv.find(a => a.startsWith('--transport'));
+  if (!arg) {
+    return 'stdio';
+  }
+  const value = arg.split('=')[1];
+  return value || 'stdio';
+}
+
+async function startStdioTransport(serverInstance) {
+  logger.info('[STDIO] Starting server with stdio transport');
+  const transport = new StdioServerTransport();
+  await serverInstance.server.connect(transport);
+  logger.info('[STDIO] Server connected via stdio');
+}
+
+async function startHttpTransport(serverInstance) {
+  const port = process.env.HTTP_PORT || 3000;
+  const host = process.env.HTTP_HOST || '127.0.0.1';
+
+  logger.info(`[HTTP] Starting server with HTTP transport on ${host}:${port}`);
+
+  const app = express();
+  app.use(express.json());
+
+  const transports = {};
+
+  app.post('/mcp', async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    let transport = transports[sessionId];
+
+    if (sessionId && transports[sessionId]) {
+      transport = transports[sessionId];
+    } else if (!sessionId && isInitializeRequest(req.body)) {
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (newSessionId) => {
+          logger.info(`[HTTP] New session initialized: ${newSessionId}`);
+          transports[newSessionId] = transport;
+        }
+      });
+
+      transport.onclose = () => {
+        if (transport.sessionId) {
+          logger.info(`[HTTP] Session closed: ${transport.sessionId}`);
+          delete transports[transport.sessionId];
+        }
+      };
+      
+      await serverInstance.server.connect(transport);
+    } else {
+      logger.warn('[HTTP] Bad request: No valid session ID provided for non-initialize request.');
+      return res.status(400).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
+        id: null,
+      });
+    }
+
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  const handleSessionRequest = async (req, res) => {
+    const sessionId = req.headers['mcp-session-id'];
+    if (!sessionId || !transports[sessionId]) {
+      logger.warn(`[HTTP] Invalid or missing session ID for ${req.method} request.`);
+      return res.status(400).send('Invalid or missing session ID');
+    }
+    
+    const transport = transports[sessionId];
+    await transport.handleRequest(req, res);
+  };
+
+  app.get('/mcp', handleSessionRequest);
+  app.delete('/mcp', handleSessionRequest);
+
+  app.listen(port, host, () => {
+    logger.info(`[HTTP] MCP Streamable HTTP Server listening on http://${host}:${port}/mcp`);
+  });
+}
+
+async function main() {
+  logger.info('Preparing to start MCP MSSQL Server');
+  
+  const mcpServer = new MSSQLMCPServer();
+  const transportType = getTransportArg();
+
+  if (transportType === 'http') {
+    await startHttpTransport(mcpServer);
+  } else {
+    await startStdioTransport(mcpServer);
+  }
+}
+
+main().catch((error) => {
+  logger.error('Failed to start server', { error: error.message, stack: error.stack });
   process.exit(1);
 });
