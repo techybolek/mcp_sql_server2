@@ -1,6 +1,6 @@
 {
   "name": "mcp-mssql-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for MS SQL Server database queries",
   "main": "index.js",
   "type": "module",
@@ -27,5 +27,8 @@
   "license": "MIT",
   "devDependencies": {
     "axios": "^1.10.0"
+  },
+  "bin": {
+    "mcp-mssql-server": "./index.js"
   }
 }
